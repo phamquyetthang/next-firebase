@@ -1,6 +1,19 @@
 import { db } from "@/utils/firebase";
-import { addDoc, collection, doc, getDoc, getDocs, limitToLast, query, startAfter } from "firebase/firestore";
-import { NextResponse } from "next/server";
+import {
+  addDoc,
+  collection,
+  doc,
+  getCountFromServer,
+  getDoc,
+  getDocs,
+  limit,
+  orderBy,
+  Query,
+  query,
+  startAfter,
+  where,
+} from "firebase/firestore";
+import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(request: Request) {
   const data = await request.json();
@@ -18,8 +31,33 @@ export async function POST(request: Request) {
   });
 }
 
-export async function GET() {
-  const dataSnapshot = await getDocs(collection(db, "products"));
+export async function GET(request: NextRequest) {
+  const searchParams = request.nextUrl.searchParams;
+  const keyword = searchParams.get("keyword") || "";
+  const page = Number(searchParams.get("page") || 1);
+  const size = Number(searchParams.get("size") || 3);
+  const colRef = collection(db, "products");
+
+  let q = query(colRef);
+  if (keyword) {
+    q = query(
+      colRef,
+      orderBy("name"),
+      where("name", ">=", keyword),
+      where("name", "<=", keyword + "\uf8ff")
+    );
+  }
+
+  if (page > 1) {
+    const lastVisibleDoc = await getLastVisibleDoc(q, page, size);
+    console.log("🚀 ~ GET ~ lastVisibleDoc:", lastVisibleDoc);
+
+    if (lastVisibleDoc) {
+      q = query(q, startAfter(lastVisibleDoc));
+    }
+  }
+
+  const dataSnapshot = await getDocs(query(q, limit(size)));
 
   const products = await Promise.all(
     dataSnapshot.docs.map(async (p) => {
@@ -31,39 +69,22 @@ export async function GET() {
     })
   );
 
+  const totalSnapshot = await getCountFromServer(collection(db, "products"));
+
   return NextResponse.json({
-    products,
+    meta: {
+      total: totalSnapshot.data().count,
+    },
+    data: products,
   });
 }
 
-
-export async function GET_PAGINATED({
-  query: { page = "1", limit = "10" },
-}: {
-  query: { page?: string; limit?: string };
-}) {
-  const parsedPage = Number(page);
-  const parsedLimit = Number(limit);
-
-  if (isNaN(parsedPage) || isNaN(parsedLimit)) {
-    return NextResponse.json({ error: "Invalid pagination params" }, { status: 400 });
-  }
-
-  const dataSnapshot = await getDocs(
-    query(collection(db, "products"), limitToLast(parsedLimit), startAfter(parsedPage * parsedLimit - parsedLimit))
-  );
-
-  const products = await Promise.all(
-    dataSnapshot.docs.map(async (p) => {
-      const product = p.data();
-      const category = await getDoc(product.categoryId);
-      product.category = { id: category.id, ...(category.data() as object) };
-      delete product.categoryId;
-      return { ...product, id: p.id };
-    })
-  );
-
-  return NextResponse.json({
-    products,
-  });
+async function getLastVisibleDoc(
+  queryRef: Query,
+  page: number,
+  pageSize: number
+) {
+  const q = query(queryRef, limit((page - 1) * pageSize));
+  const querySnapshot = await getDocs(q);
+  return querySnapshot.docs[querySnapshot.docs.length - 1];
 }
